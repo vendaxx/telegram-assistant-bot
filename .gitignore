@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local config
+.env.*
+!.env.example
+
+# VS Code (optional but recommended)
+.vscode/
+
+# Logs
+*.log
