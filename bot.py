@@ -41,17 +41,9 @@ logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 # ===== USER STATE =====
-# Example:
-# {
-#   123456: {
-#       "mode": "menu" | "ai_chat",
-#       "last_city": "sofia"
-#   }
-# }
 user_state: dict[int, dict[str, str]] = {}
 
 
-# ===== HELPERS =====
 def get_user_state(user_id: int) -> dict[str, str]:
     if user_id not in user_state:
         user_state[user_id] = {
@@ -61,12 +53,13 @@ def get_user_state(user_id: int) -> dict[str, str]:
     return user_state[user_id]
 
 
+# ===== MENUS =====
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🤖 Ask AI", callback_data="ai")],
             [InlineKeyboardButton("🌦 Weather", callback_data="weather")],
-            [InlineKeyboardButton("🕒 Time", callback_data="time")],
+            [InlineKeyboardButton("🧪 Time TEST", callback_data="time")],  # <-- TEST
             [InlineKeyboardButton("😂 Joke", callback_data="joke")],
             [InlineKeyboardButton("💬 Quote", callback_data="quote")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
@@ -100,9 +93,9 @@ def weather_actions_menu() -> InlineKeyboardMarkup:
     )
 
 
+# ===== HELPERS =====
 def get_time_text() -> str:
     sofia_time = datetime.now(ZoneInfo("Europe/Sofia")).strftime("%H:%M")
-    pernik_time = datetime.now(ZoneInfo("Europe/Sofia")).strftime("%H:%M")
     amsterdam_time = datetime.now(ZoneInfo("Europe/Amsterdam")).strftime("%H:%M")
     larnaca_time = datetime.now(ZoneInfo("Asia/Nicosia")).strftime("%H:%M")
     utc_time = datetime.now(timezone.utc).strftime("%H:%M")
@@ -110,7 +103,6 @@ def get_time_text() -> str:
     return (
         "🕒 Current time\n\n"
         f"Sofia: {sofia_time}\n"
-        f"Pernik: {pernik_time}\n"
         f"Amsterdam: {amsterdam_time}\n"
         f"Larnaca: {larnaca_time}\n"
         f"UTC: {utc_time}"
@@ -120,7 +112,6 @@ def get_time_text() -> str:
 def weather_code_to_text(code: int | None) -> str:
     if code is None:
         return "Unknown"
-
     return WEATHER_CODES.get(code, "Unknown")
 
 
@@ -136,51 +127,32 @@ async def get_weather(city_key: str) -> str:
         "forecast_days": 1,
     }
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get("https://api.open-meteo.com/v1/forecast", params=params)
-        response.raise_for_status()
-        data = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                "https://api.open-meteo.com/v1/forecast", params=params
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            return "⚠️ Weather service is busy. Try again in a moment."
+        raise
 
     current = data.get("current", {})
     daily = data.get("daily", {})
 
     temperature = current.get("temperature_2m", "N/A")
-    weather_code = current.get("weather_code")
-    condition = weather_code_to_text(weather_code)
-
-    rain_now = current.get("rain", 0)
-    precipitation_now = current.get("precipitation", 0)
+    condition = weather_code_to_text(current.get("weather_code"))
 
     temp_max = daily.get("temperature_2m_max", ["N/A"])[0]
     temp_min = daily.get("temperature_2m_min", ["N/A"])[0]
-    rain_chance = daily.get("precipitation_probability_max", ["N/A"])[0]
-    precipitation_sum = daily.get("precipitation_sum", [0])[0]
-    rain_sum = daily.get("rain_sum", [0])[0]
-    showers_sum = daily.get("showers_sum", [0])[0]
-
-    will_rain = (
-        isinstance(rain_sum, (int, float))
-        and rain_sum > 0
-    ) or (
-        isinstance(precipitation_sum, (int, float))
-        and precipitation_sum > 0
-    ) or (
-        isinstance(showers_sum, (int, float))
-        and showers_sum > 0
-    )
-
-    umbrella_tip = "Take an umbrella ☔" if will_rain else "No umbrella needed 😎"
 
     return (
         f"🌦 Weather in {city['name']}\n\n"
-        f"🌡 Current temperature: {temperature}°C\n"
+        f"🌡 Current: {temperature}°C\n"
         f"🌤 Condition: {condition}\n"
-        f"📈 Today: {temp_min}°C to {temp_max}°C\n"
-        f"🌧 Rain chance: {rain_chance}%\n"
-        f"💧 Current rain: {rain_now} mm\n"
-        f"💦 Current precipitation: {precipitation_now} mm\n"
-        f"☔ Will it rain today? {'Yes' if will_rain else 'No'}\n\n"
-        f"{umbrella_tip}"
+        f"📈 Today: {temp_min}°C - {temp_max}°C"
     )
 
 
@@ -194,166 +166,76 @@ async def ask_gemini(question: str) -> str:
 
 # ===== HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-
-    if update.effective_user is None:
+    if update.message is None or update.effective_user is None:
         return
 
     user = get_user_state(update.effective_user.id)
     user["mode"] = "menu"
 
     await update.message.reply_text(
-        "Welcome commander 👋\n\nChoose an option below:",
+        "🚨 VERSION 1.1 LIVE TEST 🚨\n\nChoose an option below:",
         reply_markup=main_menu(),
     )
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query is None:
+    if query is None or query.data is None or update.effective_user is None:
         return
 
     await query.answer()
 
-    if update.effective_user is None:
-        return
-
-    if query.data is None:
-        return
-
-    user_id = update.effective_user.id
+    user = get_user_state(update.effective_user.id)
     data = query.data
-    user = get_user_state(user_id)
 
     if data == "back_main":
         user["mode"] = "menu"
-        await query.edit_message_text(
-            "Main menu:",
-            reply_markup=main_menu(),
-        )
-        return
+        await query.edit_message_text("Main menu:", reply_markup=main_menu())
 
-    if data == "help":
-        await query.edit_message_text(
-            "How to use me:\n\n"
-            "• Tap Ask AI, then send a normal message.\n"
-            "• Tap Weather to choose a city.\n"
-            "• Tap Time for current city times.\n"
-            "• Tap Joke or Quote for something fun.\n",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
-        return
-
-    if data == "ai":
+    elif data == "ai":
         user["mode"] = "ai_chat"
-        await query.edit_message_text(
-            "🤖 AI mode is now active.\n\nSend me any message and I’ll ask Gemini.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
-        return
+        await query.edit_message_text("AI mode ON 🤖")
 
-    if data == "weather":
-        user["mode"] = "menu"
-        await query.edit_message_text(
-            "Choose a city:",
-            reply_markup=weather_menu(),
-        )
-        return
+    elif data == "weather":
+        await query.edit_message_text("Choose a city:", reply_markup=weather_menu())
 
-    if data.startswith("city_"):
-        city_key = data.replace("city_", "", 1)
+    elif data.startswith("city_"):
+        city_key = data.replace("city_", "")
         user["last_city"] = city_key
-        user["mode"] = "menu"
+        text = await get_weather(city_key)
+        await query.edit_message_text(text, reply_markup=weather_actions_menu())
 
-        weather_text = await get_weather(city_key)
-        await query.edit_message_text(
-            weather_text,
-            reply_markup=weather_actions_menu(),
-        )
-        return
-
-    if data == "refresh_weather":
+    elif data == "refresh_weather":
         city_key = user.get("last_city", "")
-        if not city_key:
-            await query.edit_message_text(
-                "No city selected yet.",
-                reply_markup=weather_menu(),
-            )
-            return
+        text = await get_weather(city_key)
+        await query.edit_message_text(text, reply_markup=weather_actions_menu())
 
-        weather_text = await get_weather(city_key)
-        await query.edit_message_text(
-            weather_text,
-            reply_markup=weather_actions_menu(),
-        )
-        return
+    elif data == "time":
+        await query.edit_message_text(get_time_text())
 
-    if data == "time":
-        user["mode"] = "menu"
-        await query.edit_message_text(
-            get_time_text(),
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
-        return
+    elif data == "joke":
+        await query.edit_message_text(f"😂 {random.choice(JOKES)}")
 
-    if data == "joke":
-        user["mode"] = "menu"
-        await query.edit_message_text(
-            f"😂 Joke\n\n{random.choice(JOKES)}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
-        return
-
-    if data == "quote":
-        user["mode"] = "menu"
-        await query.edit_message_text(
-            f"💬 Quote\n\n{random.choice(QUOTES)}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
-        return
+    elif data == "quote":
+        await query.edit_message_text(f"💬 {random.choice(QUOTES)}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-
-    if update.message.text is None:
-        return
-
-    if update.effective_user is None:
+    if update.message is None or update.effective_user is None or update.message.text is None:
         return
 
     user = get_user_state(update.effective_user.id)
 
     if user.get("mode") != "ai_chat":
-        await update.message.reply_text(
-            "Please choose an option from the menu first.",
-            reply_markup=main_menu(),
-        )
+        await update.message.reply_text("Use the menu first.", reply_markup=main_menu())
         return
 
-    question = update.message.text.strip()
-
-    try:
-        await update.message.reply_text("Thinking... ⏳")
-        answer = await ask_gemini(question)
-        await update.message.reply_text(answer)
-    except Exception as e:
-        logger.exception("Gemini error")
-        await update.message.reply_text(f"Something went wrong: {e}")
+    await update.message.reply_text("Thinking... 🤔")
+    answer = await ask_gemini(update.message.text)
+    await update.message.reply_text(answer)
 
 
+# ===== MAIN =====
 def main() -> None:
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
