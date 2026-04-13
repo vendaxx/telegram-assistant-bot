@@ -52,6 +52,10 @@ TEXTS = {
         "something_went_wrong": "Something went wrong with {ai_name}: {error}",
         "joke_title": "😂 Joke",
         "quote_title": "💬 Quote",
+        "ai_busy": "⚠️ {ai_name} is busy right now. Switch to another AI mode.",
+        "ask_all_ai": "⚡ Ask all AI",
+        "thinking_all": "Thinking with all AI models... 🤔",
+        "all_ai_results": "⚡ Results from all AI models",
     },
     "bg": {
         "welcome": "Добре дошъл! 👋\n\nАз съм твоят Telegram асистент.\nИзбери опция отдолу:",
@@ -106,5 +110,9 @@ TEXTS = {
         "something_went_wrong": "Нещо се обърка с {ai_name}: {error}",
         "joke_title": "😂 Шега",
         "quote_title": "💬 Цитат",
+        "ai_busy": "⚠️ {ai_name} е натоварен в момента. Избери друг AI.",
+        "ask_all_ai": "⚡ Попитай всички AI",
+        "thinking_all": "Мисля с всички AI модели... 🤔",
+        "all_ai_results": "⚡ Резултати от всички AI модели",
     },
 }

@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
-
+        
 import httpx
 from google import genai
 from openai import OpenAI
@@ -288,32 +288,62 @@ async def get_weather(city_key: str, user_id: int) -> str:
 async def ask_gemini(question: str, user_id: int) -> str:
     if not gemini_client:
         return t(user_id, "gemini_not_configured")
-    response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=question,
-    )
-    return response.text or t(user_id, "no_response")
 
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=question,
+        )
+        return response.text or t(user_id, "no_response")
+
+    except Exception as e:
+        error_text = str(e)
+
+        if "503" in error_text or "UNAVAILABLE" in error_text or "high demand" in error_text:
+            return t(user_id, "ai_busy", ai_name="Gemini")
+
+        logger.exception("Gemini error")
+        return t(user_id, "something_went_wrong", ai_name="Gemini", error=str(e))
 
 async def ask_groq(question: str, user_id: int) -> str:
     if not groq_client:
         return t(user_id, "groq_not_configured")
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": question}],
-    )
-    return response.choices[0].message.content or t(user_id, "no_response")
 
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": question}],
+        )
+        return response.choices[0].message.content or t(user_id, "no_response")
+
+    except Exception as e:
+        error_text = str(e)
+
+        if "429" in error_text or "rate limit" in error_text:
+            return t(user_id, "ai_busy", ai_name="Groq")
+
+        logger.exception("Groq error")
+        return t(user_id, "something_went_wrong", ai_name="Groq", error=str(e))
 
 async def ask_openrouter(question: str, user_id: int) -> str:
     if not openrouter_client:
         return t(user_id, "openrouter_not_configured")
-    response = openrouter_client.chat.completions.create(
-        model="meta-llama/llama-3.3-70b-instruct:free",
-        messages=[{"role": "user", "content": question}],
-    )
-    return response.choices[0].message.content or t(user_id, "no_response")
 
+    try:
+        response = openrouter_client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",
+            messages=[{"role": "user", "content": question}],
+        )
+        return response.choices[0].message.content or t(user_id, "no_response")
+
+    except Exception as e:
+        error_text = str(e)
+
+        if "429" in error_text or "rate limit" in error_text:
+            return t(user_id, "ai_busy", ai_name="OpenRouter")
+
+        logger.exception("OpenRouter error")
+        return t(user_id, "something_went_wrong", ai_name="OpenRouter", error=str(e))
 
 async def ask_selected_ai(ai_name: str, question: str, user_id: int) -> str:
     if ai_name == "gemini":
