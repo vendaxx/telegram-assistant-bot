@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
-        
+
 import httpx
 from google import genai
 from openai import OpenAI
@@ -59,7 +59,7 @@ logging.getLogger("google_genai").setLevel(logging.WARNING)
 #   123456: {
 #       "mode": "menu" | "ai_chat",
 #       "last_city": "sofia",
-#       "selected_ai": "gemini",
+#       "selected_ai": "gemini" | "groq" | "openrouter" | "all",
 #       "language": "en"
 #   }
 # }
@@ -111,6 +111,8 @@ def selected_ai_label(ai_name: str) -> str:
         return "Groq"
     if ai_name == "openrouter":
         return "OpenRouter"
+    if ai_name == "all":
+        return "All AI"
     return "Unknown"
 
 
@@ -121,6 +123,8 @@ def selected_ai_icon(ai_name: str) -> str:
         return "⚡"
     if ai_name == "openrouter":
         return "🦙"
+    if ai_name == "all":
+        return "🌐"
     return "🤖"
 
 
@@ -145,6 +149,7 @@ def ai_menu(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✨ Gemini", callback_data="ai_gemini")],
             [InlineKeyboardButton("⚡ Groq", callback_data="ai_groq")],
             [InlineKeyboardButton("🦙 OpenRouter", callback_data="ai_openrouter")],
+            [InlineKeyboardButton(t(user_id, "ask_all_ai"), callback_data="ai_all")],
             [InlineKeyboardButton(t(user_id, "back"), callback_data="back_main")],
         ]
     )
@@ -285,6 +290,7 @@ async def get_weather(city_key: str, user_id: int) -> str:
     )
 
 
+# ===== AI =====
 async def ask_gemini(question: str, user_id: int) -> str:
     if not gemini_client:
         return t(user_id, "gemini_not_configured")
@@ -297,13 +303,18 @@ async def ask_gemini(question: str, user_id: int) -> str:
         return response.text or t(user_id, "no_response")
 
     except Exception as e:
-        error_text = str(e)
+        error_text = str(e).lower()
 
-        if "503" in error_text or "UNAVAILABLE" in error_text or "high demand" in error_text:
+        if (
+            "503" in error_text
+            or "unavailable" in error_text
+            or "high demand" in error_text
+        ):
             return t(user_id, "ai_busy", ai_name="Gemini")
 
         logger.exception("Gemini error")
         return t(user_id, "something_went_wrong", ai_name="Gemini", error=str(e))
+
 
 async def ask_groq(question: str, user_id: int) -> str:
     if not groq_client:
@@ -317,13 +328,19 @@ async def ask_groq(question: str, user_id: int) -> str:
         return response.choices[0].message.content or t(user_id, "no_response")
 
     except Exception as e:
-        error_text = str(e)
+        error_text = str(e).lower()
 
-        if "429" in error_text or "rate limit" in error_text:
+        if (
+            "429" in error_text
+            or "rate limit" in error_text
+            or "too many requests" in error_text
+            or "503" in error_text
+        ):
             return t(user_id, "ai_busy", ai_name="Groq")
 
         logger.exception("Groq error")
         return t(user_id, "something_went_wrong", ai_name="Groq", error=str(e))
+
 
 async def ask_openrouter(question: str, user_id: int) -> str:
     if not openrouter_client:
@@ -337,13 +354,34 @@ async def ask_openrouter(question: str, user_id: int) -> str:
         return response.choices[0].message.content or t(user_id, "no_response")
 
     except Exception as e:
-        error_text = str(e)
+        error_text = str(e).lower()
 
-        if "429" in error_text or "rate limit" in error_text:
+        if (
+            "429" in error_text
+            or "rate limit" in error_text
+            or "too many requests" in error_text
+            or "503" in error_text
+        ):
             return t(user_id, "ai_busy", ai_name="OpenRouter")
 
         logger.exception("OpenRouter error")
         return t(user_id, "something_went_wrong", ai_name="OpenRouter", error=str(e))
+
+
+async def ask_all_ai(question: str, user_id: int) -> str:
+    results = []
+
+    gemini_answer = await ask_gemini(question, user_id)
+    results.append(f"✨ Gemini:\n{gemini_answer}")
+
+    groq_answer = await ask_groq(question, user_id)
+    results.append(f"⚡ Groq:\n{groq_answer}")
+
+    openrouter_answer = await ask_openrouter(question, user_id)
+    results.append(f"🦙 OpenRouter:\n{openrouter_answer}")
+
+    return "\n\n".join(results)
+
 
 async def ask_selected_ai(ai_name: str, question: str, user_id: int) -> str:
     if ai_name == "gemini":
@@ -352,6 +390,8 @@ async def ask_selected_ai(ai_name: str, question: str, user_id: int) -> str:
         return await ask_groq(question, user_id)
     if ai_name == "openrouter":
         return await ask_openrouter(question, user_id)
+    if ai_name == "all":
+        return await ask_all_ai(question, user_id)
     return t(user_id, "no_ai_selected")
 
 
@@ -492,6 +532,21 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
+    if data == "ai_all":
+        user["mode"] = "ai_chat"
+        user["selected_ai"] = "all"
+        await safe_edit_message(
+            query,
+            t(
+                user_id,
+                "ai_selected_send",
+                icon=selected_ai_icon("all"),
+                ai_name=selected_ai_label("all"),
+            ),
+            reply_markup=back_to_main_menu(user_id),
+        )
+        return
+
     if data == "weather":
         user["mode"] = "menu"
         await safe_edit_message(query, t(user_id, "choose_city"), reply_markup=weather_menu(user_id))
@@ -560,10 +615,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     question = update.message.text.strip()
 
     try:
-        await update.message.reply_text(
-            t(user_id, "thinking_with", ai_name=selected_ai_label(selected_ai))
-        )
+        if selected_ai == "all":
+            await update.message.reply_text(t(user_id, "thinking_all"))
+        else:
+            await update.message.reply_text(
+                t(user_id, "thinking_with", ai_name=selected_ai_label(selected_ai))
+            )
+
         answer = await ask_selected_ai(selected_ai, question, user_id)
+
+        if selected_ai == "all":
+            answer = f"{t(user_id, 'all_ai_results')}\n\n{answer}"
+
         await update.message.reply_text(answer)
     except Exception as e:
         logger.exception("AI error")
