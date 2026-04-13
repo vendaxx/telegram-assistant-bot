@@ -1,7 +1,9 @@
 import os
 import logging
 import random
+import threading
 from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -44,6 +46,23 @@ logging.getLogger("google_genai").setLevel(logging.WARNING)
 user_state: dict[int, dict[str, str]] = {}
 
 
+# ===== HEALTHCHECK SERVER =====
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def run_health_server() -> None:
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
 def get_user_state(user_id: int) -> dict[str, str]:
     if user_id not in user_state:
         user_state[user_id] = {
@@ -59,7 +78,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🤖 Ask AI", callback_data="ai")],
             [InlineKeyboardButton("🌦 Weather", callback_data="weather")],
-            [InlineKeyboardButton("🧪 Time TEST", callback_data="time")],  # <-- TEST
+            [InlineKeyboardButton("🧪 Time TEST", callback_data="time")],
             [InlineKeyboardButton("😂 Joke", callback_data="joke")],
             [InlineKeyboardButton("💬 Quote", callback_data="quote")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
@@ -130,14 +149,19 @@ async def get_weather(city_key: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(
-                "https://api.open-meteo.com/v1/forecast", params=params
+                "https://api.open-meteo.com/v1/forecast",
+                params=params,
             )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as e:
+        logger.exception("Weather error")
         if e.response.status_code == 429:
-            return "⚠️ Weather service is busy. Try again in a moment."
-        raise
+            return "⚠️ Weather service is busy right now. Please try again in a moment."
+        return "⚠️ Weather service returned an error."
+    except Exception:
+        logger.exception("Unexpected weather error")
+        return "⚠️ Could not fetch weather right now."
 
     current = data.get("current", {})
     daily = data.get("daily", {})
@@ -147,11 +171,13 @@ async def get_weather(city_key: str) -> str:
 
     temp_max = daily.get("temperature_2m_max", ["N/A"])[0]
     temp_min = daily.get("temperature_2m_min", ["N/A"])[0]
+    rain_chance = daily.get("precipitation_probability_max", ["N/A"])[0]
 
     return (
         f"🌦 Weather in {city['name']}\n\n"
         f"🌡 Current: {temperature}°C\n"
         f"🌤 Condition: {condition}\n"
+        f"🌧 Rain chance: {rain_chance}%\n"
         f"📈 Today: {temp_min}°C - {temp_max}°C"
     )
 
@@ -191,33 +217,79 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data == "back_main":
         user["mode"] = "menu"
         await query.edit_message_text("Main menu:", reply_markup=main_menu())
+        return
 
-    elif data == "ai":
+    if data == "help":
+        await query.edit_message_text(
+            "How to use me:\n\n"
+            "• Tap Ask AI, then send a normal message.\n"
+            "• Tap Weather to choose a city.\n"
+            "• Tap Time TEST to see the current time.\n"
+            "• Tap Joke or Quote for something fun.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+            ),
+        )
+        return
+
+    if data == "ai":
         user["mode"] = "ai_chat"
-        await query.edit_message_text("AI mode ON 🤖")
+        await query.edit_message_text(
+            "AI mode ON 🤖",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+            ),
+        )
+        return
 
-    elif data == "weather":
+    if data == "weather":
+        user["mode"] = "menu"
         await query.edit_message_text("Choose a city:", reply_markup=weather_menu())
+        return
 
-    elif data.startswith("city_"):
-        city_key = data.replace("city_", "")
+    if data.startswith("city_"):
+        city_key = data.replace("city_", "", 1)
         user["last_city"] = city_key
         text = await get_weather(city_key)
         await query.edit_message_text(text, reply_markup=weather_actions_menu())
+        return
 
-    elif data == "refresh_weather":
+    if data == "refresh_weather":
         city_key = user.get("last_city", "")
+        if not city_key:
+            await query.edit_message_text("No city selected yet.", reply_markup=weather_menu())
+            return
+
         text = await get_weather(city_key)
         await query.edit_message_text(text, reply_markup=weather_actions_menu())
+        return
 
-    elif data == "time":
-        await query.edit_message_text(get_time_text())
+    if data == "time":
+        await query.edit_message_text(
+            get_time_text(),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+            ),
+        )
+        return
 
-    elif data == "joke":
-        await query.edit_message_text(f"😂 {random.choice(JOKES)}")
+    if data == "joke":
+        await query.edit_message_text(
+            f"😂 Joke\n\n{random.choice(JOKES)}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+            ),
+        )
+        return
 
-    elif data == "quote":
-        await query.edit_message_text(f"💬 {random.choice(QUOTES)}")
+    if data == "quote":
+        await query.edit_message_text(
+            f"💬 Quote\n\n{random.choice(QUOTES)}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+            ),
+        )
+        return
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -227,7 +299,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = get_user_state(update.effective_user.id)
 
     if user.get("mode") != "ai_chat":
-        await update.message.reply_text("Use the menu first.", reply_markup=main_menu())
+        await update.message.reply_text(
+            "Use the menu first.",
+            reply_markup=main_menu(),
+        )
         return
 
     await update.message.reply_text("Thinking... 🤔")
@@ -235,8 +310,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(answer)
 
 
-# ===== MAIN =====
 def main() -> None:
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
