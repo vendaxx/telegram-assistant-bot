@@ -8,7 +8,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from google import genai
+from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -24,10 +26,17 @@ from data.weather import CITIES, WEATHER_CODES
 
 # ===== ENV =====
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GEMINI_KEY = os.environ["GEMINI_KEY"]
+GEMINI_KEY = os.environ.get("GEMINI_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_KEY", "")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
 
 # ===== CLIENTS =====
-gemini_client = genai.Client(api_key=GEMINI_KEY)
+gemini_client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
+groq_client = OpenAI(api_key=GROQ_KEY, base_url="https://api.groq.com/openai/v1") if GROQ_KEY else None
+openrouter_client = OpenAI(
+    api_key=OPENROUTER_KEY,
+    base_url="https://openrouter.ai/api/v1",
+) if OPENROUTER_KEY else None
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -40,9 +49,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("google_genai").setLevel(logging.WARNING)
 
 # ===== USER STATE =====
+# Example:
+# {
+#   123456: {
+#       "mode": "menu" | "ai_chat",
+#       "last_city": "sofia",
+#       "selected_ai": "gemini"
+#   }
+# }
 user_state: dict[int, dict[str, str]] = {}
 
 
@@ -63,11 +81,13 @@ def run_health_server() -> None:
     server.serve_forever()
 
 
+# ===== STATE =====
 def get_user_state(user_id: int) -> dict[str, str]:
     if user_id not in user_state:
         user_state[user_id] = {
             "mode": "menu",
             "last_city": "",
+            "selected_ai": "",
         }
     return user_state[user_id]
 
@@ -76,12 +96,23 @@ def get_user_state(user_id: int) -> dict[str, str]:
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🤖 Ask AI", callback_data="ai")],
+            [InlineKeyboardButton("🤖 Ask AI", callback_data="ai_menu")],
             [InlineKeyboardButton("🌦 Weather", callback_data="weather")],
-            [InlineKeyboardButton("🧪 Time TEST", callback_data="time")],
+            [InlineKeyboardButton("🕒 Time", callback_data="time")],
             [InlineKeyboardButton("😂 Joke", callback_data="joke")],
             [InlineKeyboardButton("💬 Quote", callback_data="quote")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
+        ]
+    )
+
+
+def ai_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✨ Gemini", callback_data="ai_gemini")],
+            [InlineKeyboardButton("⚡ Groq", callback_data="ai_groq")],
+            [InlineKeyboardButton("🦙 OpenRouter", callback_data="ai_openrouter")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back_main")],
         ]
     )
 
@@ -112,9 +143,16 @@ def weather_actions_menu() -> InlineKeyboardMarkup:
     )
 
 
+def back_to_main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
+    )
+
+
 # ===== HELPERS =====
 def get_time_text() -> str:
     sofia_time = datetime.now(ZoneInfo("Europe/Sofia")).strftime("%H:%M")
+    pernik_time = datetime.now(ZoneInfo("Europe/Sofia")).strftime("%H:%M")
     amsterdam_time = datetime.now(ZoneInfo("Europe/Amsterdam")).strftime("%H:%M")
     larnaca_time = datetime.now(ZoneInfo("Asia/Nicosia")).strftime("%H:%M")
     utc_time = datetime.now(timezone.utc).strftime("%H:%M")
@@ -122,6 +160,7 @@ def get_time_text() -> str:
     return (
         "🕒 Current time\n\n"
         f"Sofia: {sofia_time}\n"
+        f"Pernik: {pernik_time}\n"
         f"Amsterdam: {amsterdam_time}\n"
         f"Larnaca: {larnaca_time}\n"
         f"UTC: {utc_time}"
@@ -168,26 +207,80 @@ async def get_weather(city_key: str) -> str:
 
     temperature = current.get("temperature_2m", "N/A")
     condition = weather_code_to_text(current.get("weather_code"))
-
+    rain_chance = daily.get("precipitation_probability_max", ["N/A"])[0]
     temp_max = daily.get("temperature_2m_max", ["N/A"])[0]
     temp_min = daily.get("temperature_2m_min", ["N/A"])[0]
-    rain_chance = daily.get("precipitation_probability_max", ["N/A"])[0]
+
+    rain_sum = daily.get("rain_sum", [0])[0]
+    precipitation_sum = daily.get("precipitation_sum", [0])[0]
+    showers_sum = daily.get("showers_sum", [0])[0]
+
+    will_rain = (
+        (isinstance(rain_sum, (int, float)) and rain_sum > 0)
+        or (isinstance(precipitation_sum, (int, float)) and precipitation_sum > 0)
+        or (isinstance(showers_sum, (int, float)) and showers_sum > 0)
+    )
+
+    rain_text = "Yes ☔" if will_rain else "No 😎"
 
     return (
         f"🌦 Weather in {city['name']}\n\n"
         f"🌡 Current: {temperature}°C\n"
         f"🌤 Condition: {condition}\n"
         f"🌧 Rain chance: {rain_chance}%\n"
+        f"☔ Will it rain today? {rain_text}\n"
         f"📈 Today: {temp_min}°C - {temp_max}°C"
     )
 
 
 async def ask_gemini(question: str) -> str:
+    if not gemini_client:
+        return "Gemini is not configured."
     response = gemini_client.models.generate_content(
         model="gemini-2.5-flash",
         contents=question,
     )
     return response.text or "No response."
+
+
+async def ask_groq(question: str) -> str:
+    if not groq_client:
+        return "Groq is not configured."
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": question}],
+    )
+    return response.choices[0].message.content or "No response."
+
+
+async def ask_openrouter(question: str) -> str:
+    if not openrouter_client:
+        return "OpenRouter is not configured."
+    response = openrouter_client.chat.completions.create(
+        model="meta-llama/llama-3.3-70b-instruct:free",
+        messages=[{"role": "user", "content": question}],
+    )
+    return response.choices[0].message.content or "No response."
+
+
+async def ask_selected_ai(ai_name: str, question: str) -> str:
+    if ai_name == "gemini":
+        return await ask_gemini(question)
+    if ai_name == "groq":
+        return await ask_groq(question)
+    if ai_name == "openrouter":
+        return await ask_openrouter(question)
+    return "No AI selected."
+
+
+def selected_ai_label(ai_name: str) -> str:
+    if ai_name == "gemini":
+        return "Gemini"
+    if ai_name == "groq":
+        return "Groq"
+    if ai_name == "openrouter":
+        return "OpenRouter"
+    return "Unknown"
 
 
 # ===== HANDLERS =====
@@ -199,9 +292,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user["mode"] = "menu"
 
     await update.message.reply_text(
-        "🚨 VERSION 1.1 LIVE TEST 🚨\n\nChoose an option below:",
+        "Welcome! 👋\n\nI'm your Telegram assistant.\nChoose an option below:",
         reply_markup=main_menu(),
     )
+
+
+async def safe_edit_message(query, text: str, reply_markup=None) -> None:
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            logger.warning("Ignored harmless Telegram edit error: message not modified")
+            return
+        raise
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,78 +319,100 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if data == "back_main":
         user["mode"] = "menu"
-        await query.edit_message_text("Main menu:", reply_markup=main_menu())
+        await safe_edit_message(query, "Main menu:", reply_markup=main_menu())
         return
 
     if data == "help":
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "How to use me:\n\n"
-            "• Tap Ask AI, then send a normal message.\n"
+            "• Tap Ask AI and choose a model.\n"
+            "• Then send me a normal message.\n"
             "• Tap Weather to choose a city.\n"
-            "• Tap Time TEST to see the current time.\n"
+            "• Tap Time for current city times.\n"
             "• Tap Joke or Quote for something fun.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
+            reply_markup=back_to_main_menu(),
         )
         return
 
-    if data == "ai":
+    if data == "ai_menu":
+        user["mode"] = "menu"
+        await safe_edit_message(
+            query,
+            "Choose which AI you want to use:",
+            reply_markup=ai_menu(),
+        )
+        return
+
+    if data == "ai_gemini":
         user["mode"] = "ai_chat"
-        await query.edit_message_text(
-            "AI mode ON 🤖",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
+        user["selected_ai"] = "gemini"
+        await safe_edit_message(
+            query,
+            "✨ Gemini selected.\n\nSend me any message.",
+            reply_markup=back_to_main_menu(),
+        )
+        return
+
+    if data == "ai_groq":
+        user["mode"] = "ai_chat"
+        user["selected_ai"] = "groq"
+        await safe_edit_message(
+            query,
+            "⚡ Groq selected.\n\nSend me any message.",
+            reply_markup=back_to_main_menu(),
+        )
+        return
+
+    if data == "ai_openrouter":
+        user["mode"] = "ai_chat"
+        user["selected_ai"] = "openrouter"
+        await safe_edit_message(
+            query,
+            "🦙 OpenRouter selected.\n\nSend me any message.",
+            reply_markup=back_to_main_menu(),
         )
         return
 
     if data == "weather":
         user["mode"] = "menu"
-        await query.edit_message_text("Choose a city:", reply_markup=weather_menu())
+        await safe_edit_message(query, "Choose a city:", reply_markup=weather_menu())
         return
 
     if data.startswith("city_"):
         city_key = data.replace("city_", "", 1)
         user["last_city"] = city_key
         text = await get_weather(city_key)
-        await query.edit_message_text(text, reply_markup=weather_actions_menu())
+        await safe_edit_message(query, text, reply_markup=weather_actions_menu())
         return
 
     if data == "refresh_weather":
         city_key = user.get("last_city", "")
         if not city_key:
-            await query.edit_message_text("No city selected yet.", reply_markup=weather_menu())
+            await safe_edit_message(query, "No city selected yet.", reply_markup=weather_menu())
             return
 
         text = await get_weather(city_key)
-        await query.edit_message_text(text, reply_markup=weather_actions_menu())
+        await safe_edit_message(query, text, reply_markup=weather_actions_menu())
         return
 
     if data == "time":
-        await query.edit_message_text(
-            get_time_text(),
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
-        )
+        await safe_edit_message(query, get_time_text(), reply_markup=back_to_main_menu())
         return
 
     if data == "joke":
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"😂 Joke\n\n{random.choice(JOKES)}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
+            reply_markup=back_to_main_menu(),
         )
         return
 
     if data == "quote":
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"💬 Quote\n\n{random.choice(QUOTES)}",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔙 Main Menu", callback_data="back_main")]]
-            ),
+            reply_markup=back_to_main_menu(),
         )
         return
 
@@ -305,9 +430,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    await update.message.reply_text("Thinking... 🤔")
-    answer = await ask_gemini(update.message.text)
-    await update.message.reply_text(answer)
+    selected_ai = user.get("selected_ai", "")
+    if not selected_ai:
+        await update.message.reply_text(
+            "Please choose an AI first.",
+            reply_markup=ai_menu(),
+        )
+        return
+
+    question = update.message.text.strip()
+
+    try:
+        await update.message.reply_text(f"Thinking with {selected_ai_label(selected_ai)}... 🤔")
+        answer = await ask_selected_ai(selected_ai, question)
+        await update.message.reply_text(answer)
+    except Exception as e:
+        logger.exception("AI error")
+        await update.message.reply_text(f"Something went wrong with {selected_ai_label(selected_ai)}: {e}")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+
+    if isinstance(error, BadRequest) and "Message is not modified" in str(error):
+        logger.warning("Ignored harmless Telegram BadRequest: Message is not modified")
+        return
+
+    if error and "Conflict: terminated by other getUpdates request" in str(error):
+        logger.warning("Telegram polling conflict detected. Another bot instance may still be running.")
+        return
+
+    logger.exception("Unhandled exception", exc_info=error)
 
 
 def main() -> None:
@@ -318,6 +471,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
     logger.info("Bot is online!")
     app.run_polling(drop_pending_updates=True)
