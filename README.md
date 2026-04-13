@@ -41,7 +41,7 @@ A modern Telegram assistant bot featuring AI chat, quick weather access, and a c
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/vendaxx/telegram-assistant-bot.git && cd telegram-assistant-bot
+git clone https://github.com/xzackk/telegram-assistant-bot.git && cd telegram-assistant-bot
 ```
 
 ### 2. Install dependencies
