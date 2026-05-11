@@ -24,4 +24,5 @@ JOKES = [
     "Why don’t bachelors like Git? Because they are afraid to commit.",
     "What’s a computer’s least favorite food? Spam.",
     "The programmer got stuck in the shower because the instructions said: lather, rinse, repeat.",
+    "Why don't scientists trust atoms?Because they make up everything!"
 ]
